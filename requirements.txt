@@ -1,0 +1,20 @@
+fastapi
+uvicorn
+pyttsx3
+speechrecognition
+openai
+python-multipart
+
+# --- Google and AI ---
+google-adk
+google-generativeai
+google-cloud-aiplatform
+google-cloud-storage
+
+pydub 
+requests
+python-dotenv
+pvporcupine
+sounddevice
+numpy
+pyaudio
