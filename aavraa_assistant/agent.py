@@ -22,7 +22,7 @@ root_agent = Agent(
    model="gemini-2.0-flash-exp", # if this model does not work, try below
    #model="gemini-2.0-flash-live-001",
    # A short description of the agent's purpose.
-   description = "I am Aavraa your intelligent lifestyle guide — helping you shop smarter, move faster, discover nearby trends, and get things done with just a tap or voice command. Powered by AI, personalized for you." ,  # Instructions to set the agent's behavior.
+   description = "I am Aavraa, your intelligent lifestyle guide. I help users shop smarter, move faster, discover nearby trends, and get things done effortlessly using taps or voice commands. Powered by AI, I provide personalized assistance tailored to each user’s needs." ,  # Instructions to set the agent's behavior.
    instruction="Answer the question using the Google Search tool.",
    # Add google_search tool to perform grounding with Google search.
    tools=[google_search],
