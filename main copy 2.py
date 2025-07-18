@@ -3,8 +3,6 @@ import json
 import asyncio
 import base64
 import warnings
-import time # Added for keepalive timing
-
 from dotenv import load_dotenv
 
 from google.genai.types import Part, Content, Blob
@@ -12,9 +10,9 @@ from google.adk.runners import InMemoryRunner
 from google.adk.agents import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware # Added for CORS
 
 # Assuming aavraa_assistant.agent and root_agent exist in your project structure
+# Make sure your agent.py file is correctly configured to be imported here.
 from aavraa_assistant.agent import root_agent 
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
@@ -36,6 +34,9 @@ async def start_agent_session(user_id: str, is_audio: bool = False):
         app_name=APP_NAME,
         user_id=user_id,
     )
+    # Set the response modality for the agent.
+    # If is_audio is True, the agent will primarily try to respond with AUDIO.
+    # Otherwise, it will respond with TEXT.
     modality = "AUDIO" if is_audio else "TEXT"
     run_config = RunConfig(response_modalities=[modality])
     live_request_queue = LiveRequestQueue()
@@ -51,7 +52,7 @@ async def start_agent_session(user_id: str, is_audio: bool = False):
 async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio: bool):
     """
     Handles messages coming from the agent and sends them to the client.
-    Now sends text even in audio mode, and filters non-partial text events.
+    Filters text responses if the session is in audio mode.
     """
     try:
         async for event in live_events:
@@ -80,20 +81,17 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
                     }))
                     print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes.")
 
-            # If it's text data, send it ONLY IF IT'S A PARTIAL EVENT
-            # This prevents sending duplicate full text responses after partials.
+            # If it's text data, ONLY send it if NOT in audio mode
             elif part.text:
-                # Removed the `if not is_audio` filter to always send text if available
-                if event.partial: # <--- CRITICAL: Only send partial text updates
+                if not is_audio: # This is the crucial check to filter text
                     await websocket.send_text(json.dumps({
                         "mime_type": "text/plain",
                         "data": part.text,
                     }))
                     print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
-                # else:
-                    # If event.partial is False, it's typically the final full text.
-                    # Frontend should have already accumulated this from partials.
-                    # print(f"[AGENT TO CLIENT]: Ignored non-partial text part (assumed aggregated by client): '{part.text}'")
+                else:
+                    # Log that a text part was received but ignored because client is in audio mode
+                    print(f"[AGENT TO CLIENT]: Ignored text part (received in audio mode): '{part.text}'")
 
     except Exception as e:
         print(f"[AGENT ERROR] Error in agent_to_client_messaging: {e}")
@@ -103,7 +101,6 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
 async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: LiveRequestQueue, state: dict, user_id: int):
     """
     Handles messages coming from the client and sends them to the agent.
-    Manages end of audio turn signaling via empty content.
     """
     try:
         while True:
@@ -127,7 +124,6 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
 
             mime_type = message.get("mime_type")
             data = message.get("data")
-            command = message.get("command") # Explicitly capture command
 
             # Process text input from client
             if mime_type == "text/plain":
@@ -147,17 +143,11 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
                 print(f"[CLIENT TO AGENT]: Audio: {len(audio_bytes)} bytes")
 
             # Handle end of audio signal from client (e.g., when recording stops)
-            # This is the signal for a complete user utterance in audio mode.
-            elif command == "endOfAudio": # <--- Use the captured command
-                # Send a small silent chunk (optional, helps ensure last bits of audio are processed)
+            elif message.get("command") == "endOfAudio":
+                # Send a small silent chunk to signal end of stream to ADK
                 silent_audio = bytes([128] * 320) # A small silent PCM chunk
                 live_request_queue.send_realtime(Blob(data=silent_audio, mime_type="audio/pcm"))
-                
-                # --- CRITICAL: Signal end of turn using empty content ---
-                # This is the workaround for missing `end_realtime()` in your LiveRequestQueue.
-                # It tells the ADK that the user's turn is complete and it should process prior input.
-                live_request_queue.send_content(Content(role="user", parts=[Part.from_text(text="")]))
-                print(f"[CLIENT TO AGENT]: End of audio signal received -> Sent empty content to end turn.")
+                print(f"[CLIENT TO AGENT]: End of audio signal received")
 
             else:
                 print(f"[CLIENT ERROR] Unsupported message: {message}")
@@ -171,26 +161,6 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
 
 app = FastAPI()
 
-# --- Re-added CORS Middleware (Crucial for frontend communication) ---
-origins = [
-    "http://localhost:3000",  # Dev frontend
-    "https://aavraa.com",  # Production frontend domain
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-# --- End Re-added CORS Middleware ---
-
-@app.get("/")
-def health():
-    return {"status": "ok", "app": "aavraa-agent"}
-
-
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int):
     """
@@ -202,10 +172,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
     # Determine if the client wants audio mode based on query parameter
     is_audio = websocket.query_params.get("is_audio", "false").lower() == "true"
     print(f"Client #{user_id} connected, audio mode: {is_audio}")
+    # --- DEBUG PRINT STATEMENT ---
+    # This is crucial for verifying if the server correctly detects the audio mode.
     print(f"DEBUG: Determined is_audio from query params: {is_audio}")
+    # -----------------------------
 
     # Start the agent session with the determined modality
     live_events, live_request_queue = await start_agent_session(str(user_id), is_audio=is_audio)
+    # live_events, live_request_queue = await start_agent_session(str(user_id), is_audio="true")
+
 
     # Send an initial prompt to the agent when the session starts
     initial_prompt = "What are you?"
@@ -215,7 +190,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
 
     # State for tracking keepalive pings
     state = {
-        "last_pong": asyncio.get_event_loop().time(), # Use time.time() for more accuracy if not in loop
+        "last_pong": asyncio.get_event_loop().time(),
         "missed_pongs": 0,
         "max_missed_pongs": 4, # Max pongs to miss before disconnecting
     }
@@ -228,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
                 print(f"[KEEPALIVE] Sent ping to client #{user_id}")
                 await asyncio.sleep(10) # Ping every 10 seconds
 
-                now = asyncio.get_event_loop().time() # Use time.time() if not in loop scope
+                now = asyncio.get_event_loop().time()
                 if now - state["last_pong"] > 10: # If pong not received within 10 seconds of last ping
                     state["missed_pongs"] += 1
                     print(f"[KEEPALIVE] Missed pong #{state['missed_pongs']} from client #{user_id}")
