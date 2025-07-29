@@ -3,19 +3,23 @@ import json
 import asyncio
 import warnings
 import time
-import base64 # Explicitly import base64 if not already there
+import base64
+from copy import deepcopy
+from typing import List, Dict, Any, Optional  # Added missing imports
 
 from dotenv import load_dotenv
 
 from google.genai.types import Part, Content, Blob
 from google.adk.runners import InMemoryRunner
 from google.adk.agents import LiveRequestQueue
-from google.adk.agents.run_config import RunConfig,StreamingMode
+from google.adk.tools.agent_tool import AgentTool
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from google.genai import types
 
-from aavraa_assistant.agent import aavraa_orchestrator
+# Import the function and agent from your module
+from aavraa_assistant.agent import aavraa_orchestrator, find_shopping_items
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 load_dotenv()
@@ -24,25 +28,31 @@ APP_NAME = "Aavraa"
 
 # --- Agent Session Setup ---
 
-async def start_agent_session(user_id: str, is_audio: bool = False):
+async def start_agent_session(user_id: str, is_audio: bool = False, agent=None):
     """
     Initializes an agent session with the specified modality.
     """
+    # Use the provided agent or default to the global one
+    agent = agent or aavraa_orchestrator
+    
     runner = InMemoryRunner(
         app_name=APP_NAME,
-        agent=aavraa_orchestrator,
+        agent=agent,
     )
     session = await runner.session_service.create_session(
         app_name=APP_NAME,
         user_id=user_id,
     )
+    # Initialize session storage for shopping results
+    session.shopping_results = []
+
     modality = "AUDIO" if is_audio else "TEXT"
     run_config = RunConfig(
         response_modalities=[modality],
-        output_audio_transcription=types.AudioTranscriptionConfig(), # Enables ADK to send text transcription of its spoken response
-        input_audio_transcription=types.AudioTranscriptionConfig(),  # Enables ADK to transcribe user's audio input
-        realtime_input_config=types.RealtimeInputConfig(),          # Enables real-time input processing
-        streaming_mode=StreamingMode.BIDI,                           # Crucial for continuous bidirectional streaming with VAD
+        output_audio_transcription=types.AudioTranscriptionConfig(), 
+        input_audio_transcription=types.AudioTranscriptionConfig(), 
+        realtime_input_config=types.RealtimeInputConfig(), 
+        streaming_mode=StreamingMode.BIDI, 
         save_input_blobs_as_artifacts=True,
     )
     live_request_queue = LiveRequestQueue()
@@ -51,14 +61,14 @@ async def start_agent_session(user_id: str, is_audio: bool = False):
         live_request_queue=live_request_queue,
         run_config=run_config,
     )
-    return live_events, live_request_queue
+    return live_events, live_request_queue, session  
 
 # --- Agent to Client Messaging ---
 
-async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio: bool):
+async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio: bool, session):
     """
     Handles messages coming from the agent and sends them to the client.
-    Sends text even in audio mode, and filters non-partial text events.
+    Also sends shopping results after processing events.
     """
     try:
         async for event in live_events:
@@ -72,46 +82,37 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
                 print(f"[AGENT TO CLIENT]: {message}")
                 continue
 
-            # Process function responses FIRST
-            responses = event.get_function_responses()
-            if responses:
-                for response in responses:
-                    tool_name = response.name
-                    if tool_name == "find_shopping_items":
-                        result_dict = response.response
-                        
-                        # print(f"\n🛍️ Shopping Items from Tool: {tool_name}")
-                        
-                        # Send structured shopping data to client
-                        await websocket.send_text(json.dumps({
-                            "mime_type": "application/json",
-                            "type": "function_response",
-                            "tool_name": tool_name,
-                            "response": result_dict
-                        }))
-                        
-                        
-            # Process content parts (text/audio)
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    # If it's audio data, send it
-                    if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
-                        audio_data = part.inline_data.data
-                        if audio_data:
-                            await websocket.send_text(json.dumps({
-                                "mime_type": "audio/pcm",
-                                "data": base64.b64encode(audio_data).decode("ascii"),
-                            }))
-                            print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes.")
+            # Ensure there's content and parts to process
+            part: Part = event.content.parts[0] if event.content and event.content.parts else None
+            if not part:
+                continue
 
-                    # If it's text data, send it ONLY IF IT'S A PARTIAL EVENT
-                    elif part.text:
-                        if event.partial:
-                            await websocket.send_text(json.dumps({
-                                "mime_type": "text/plain",
-                                "data": part.text,
-                            }))
-                            print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
+            # If it's audio data, send it
+            if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
+                audio_data = part.inline_data.data
+                if audio_data:
+                    await websocket.send_text(json.dumps({
+                        "mime_type": "audio/pcm",
+                        "data": base64.b64encode(audio_data).decode("ascii"),
+                    }))
+                    print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes.")
+
+            # If it's text data, send it ONLY IF IT'S A PARTIAL EVENT
+            elif part.text:
+                if event.partial:  # Critical: Only send partial text updates
+                    await websocket.send_text(json.dumps({
+                        "mime_type": "text/plain",
+                        "data": part.text,
+                    }))
+                    print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
+
+        # After processing events, send shopping results if any
+        if hasattr(session, 'shopping_results') and session.shopping_results:
+            await websocket.send_text(json.dumps({
+                "type": "shopping_results",
+                "data": session.shopping_results
+            }))
+            print(f"[AGENT TO CLIENT] Sent {len(session.shopping_results)} shopping items")
 
     except Exception as e:
         print(f"[AGENT ERROR] Error in agent_to_client_messaging: {e}")
@@ -121,8 +122,6 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
 async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: LiveRequestQueue, state: dict, user_id: int):
     """
     Handles messages coming from the client and sends them to the agent.
-    Removed explicit end of audio turn signaling via empty content,
-    relying on ADK's implicit end-of-stream detection.
     """
     try:
         while True:
@@ -135,7 +134,6 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
             if msg_json.strip() == "__pong__":
                 state["last_pong"] = asyncio.get_event_loop().time()
                 state["missed_pongs"] = 0
-                # print(f"[KEEPALIVE] Pong received from client #{user_id}") # Too chatty
                 continue
 
             try:
@@ -163,10 +161,6 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
                 live_request_queue.send_realtime(blob)
                 print(f"[CLIENT TO AGENT]: Audio: {len(audio_bytes)} bytes")
 
-            # Removed the 'endOfAudio' command logic.
-            # The ADK is expected to detect the end of the audio turn implicitly
-            # when audio chunks stop arriving for a certain duration (silence detection).
-
             else:
                 print(f"[CLIENT ERROR] Unsupported message: {message}")
 
@@ -179,11 +173,11 @@ async def client_to_agent_messaging(websocket: WebSocket, live_request_queue: Li
 
 app = FastAPI()
 
-# --- CORS Middleware (Crucial for frontend communication) ---
+# --- CORS Middleware ---
 origins = [
-    "http://localhost:3000",  # Dev frontend
+    "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://aavraa.com",  # Production frontend domain
+    "https://aavraa.com",
 ]
 
 app.add_middleware(
@@ -193,24 +187,59 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# --- End CORS Middleware ---
 
 @app.get("/")
 def health():
     return {"status": "ok", "app": "aavraa-agent"}
 
+# Create session-specific shopping tool wrapper
+def create_shopping_tool_wrapper(session):
+    """Factory for creating session-aware shopping tools"""
+    def wrapped_find_shopping_items(queries: List[str]) -> Dict[str, Any]:
+        result = find_shopping_items(queries)
+        if result.get("status") == "success" and result.get("items"):
+            # Store items in session
+            if not hasattr(session, 'shopping_results'):
+                session.shopping_results = []
+            session.shopping_results.extend(result["items"])
+        return result
+    return wrapped_find_shopping_items
+
+# Create a session-specific agent
+def create_session_agent(session):
+    """Create a session-specific agent with a custom shopping tool"""
+    # Create a deep copy of the original agent
+    session_agent = deepcopy(aavraa_orchestrator)
+    
+    # Create session-specific shopping tool
+    shopping_tool = create_shopping_tool_wrapper(session)
+    
+    # Replace the shopping tool in the agent's tools
+    session_agent.tools = [
+        AgentTool(agent=tool.agent) if hasattr(tool, 'agent') else shopping_tool
+        for tool in session_agent.tools
+    ]
+    
+    return session_agent
+
 # Dedicated Audio-Only WebSocket Endpoint
 @app.websocket("/ws/audio/{user_id}")
 async def audio_websocket_endpoint(websocket: WebSocket, user_id: int):
-    """
-    Dedicated audio-only WebSocket endpoint.
-    Forces audio mode regardless of query parameters.
-    """
     await websocket.accept()
     print(f"Audio-only client #{user_id} connected")
 
-    # Start agent session with audio mode forced
-    live_events, live_request_queue = await start_agent_session(str(user_id), is_audio=True)
+    # Create session-specific agent
+    session_agent = create_session_agent(None)  # We'll attach session later
+    
+    # Start agent session
+    live_events, live_request_queue, session = await start_agent_session(
+        str(user_id), 
+        is_audio=True,
+        agent=session_agent
+    )
+    
+    # Now that we have session, attach it to the agent
+    session_agent = create_session_agent(session)
 
     # State for tracking keepalive pings
     state = {
@@ -243,14 +272,14 @@ async def audio_websocket_endpoint(websocket: WebSocket, user_id: int):
         except Exception as e:
             print(f"[KEEPALIVE ERROR] Error in keepalive_ping: {e}")
 
-    # Send initial prompt (Optional, but useful for a first greeting/intro)
-    initial_prompt = "What are you?" # Or a more audio-friendly greeting
+    # Send initial prompt
+    initial_prompt = "What are you?"
     content = Content(role="user", parts=[Part.from_text(text=initial_prompt)])
     live_request_queue.send_content(content=content)
     print(f"[SERVER] Sent initial prompt: '{initial_prompt}' to audio client.")
 
     # Create and run concurrent tasks
-    agent_task = asyncio.create_task(agent_to_client_messaging(websocket, live_events, True))
+    agent_task = asyncio.create_task(agent_to_client_messaging(websocket, live_events, True, session))
     client_task = asyncio.create_task(client_to_agent_messaging(websocket, live_request_queue, state, user_id))
     ping_task = asyncio.create_task(keepalive_ping())
 
@@ -275,15 +304,21 @@ async def audio_websocket_endpoint(websocket: WebSocket, user_id: int):
 # Dedicated Text-Only WebSocket Endpoint
 @app.websocket("/ws/text/{user_id}")
 async def text_websocket_endpoint(websocket: WebSocket, user_id: int):
-    """
-    Dedicated text-only WebSocket endpoint.
-    Forces text mode regardless of query parameters.
-    """
     await websocket.accept()
     print(f"Text-only client #{user_id} connected")
 
-    # Start agent session with text mode forced
-    live_events, live_request_queue = await start_agent_session(str(user_id), is_audio=False)
+    # Create session-specific agent
+    session_agent = create_session_agent(None)  # We'll attach session later
+    
+    # Start agent session
+    live_events, live_request_queue, session = await start_agent_session(
+        str(user_id), 
+        is_audio=False,
+        agent=session_agent
+    )
+    
+    # Now that we have session, attach it to the agent
+    session_agent = create_session_agent(session)
 
     # State for tracking keepalive pings
     state = {
@@ -316,14 +351,14 @@ async def text_websocket_endpoint(websocket: WebSocket, user_id: int):
         except Exception as e:
             print(f"[KEEPALIVE ERROR] Error in keepalive_ping: {e}")
 
-    # Send initial prompt (Optional, but useful for a first greeting/intro)
+    # Send initial prompt
     initial_prompt = "What are you?"
     content = Content(role="user", parts=[Part.from_text(text=initial_prompt)])
     live_request_queue.send_content(content=content)
     print(f"[SERVER] Sent initial prompt: '{initial_prompt}' to text client.")
 
     # Create and run concurrent tasks
-    agent_task = asyncio.create_task(agent_to_client_messaging(websocket, live_events, False))
+    agent_task = asyncio.create_task(agent_to_client_messaging(websocket, live_events, False, session))
     client_task = asyncio.create_task(client_to_agent_messaging(websocket, live_request_queue, state, user_id))
     ping_task = asyncio.create_task(keepalive_ping())
 
@@ -344,6 +379,3 @@ async def text_websocket_endpoint(websocket: WebSocket, user_id: int):
     # Clean up
     live_request_queue.close()
     print(f"[SERVER] Text client #{user_id} disconnected")
-
-# Removed the general /ws/{user_id} endpoint as it's now redundant with dedicated /ws/audio and /ws/text
-# This simplifies the routing and ensures clear modality handling.

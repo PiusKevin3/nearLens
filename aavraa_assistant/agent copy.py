@@ -1,4 +1,4 @@
-from google.adk.agents import Agent,SequentialAgent
+from google.adk.agents import Agent,LlmAgent,SequentialAgent
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools import google_search  # Import the tool
 from aavraa_assistant.instructions import (AAVRAA_INTRODUCTORY_AGENT_INSTRUCTION,AAVRAA_SHOP_AGENT_INSTRUCTION,MARKET_RESEARCHER_AGENT_INSTRUCTION)
@@ -6,6 +6,9 @@ import os
 import requests
 import json
 from typing import Dict
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
 
 try:
     from dotenv import load_dotenv
@@ -13,6 +16,18 @@ try:
     MODEL_NAME = os.environ.get("GOOGLE_GENAI_MODEL", "gemini-2.0-flash-exp")
 except ImportError:
     MODEL_NAME = "gemini-2.0-flash-exp"
+
+class ShoppingItem(BaseModel):
+    name: str = Field(description="The name of the product")
+    description: str = Field(description="A short product description")
+    image_url: str = Field(description="The full image URL")
+    price: str = Field(description="The product's price")
+    id: Optional[str] = Field(default=None, description="An optional unique identifier")
+
+class ShoppingItemsResponse(BaseModel):
+    status: str = Field(description="Status of execution, either 'success' or 'error'")
+    items: Optional[List[ShoppingItem]] = Field(default=None, description="List of matched products")
+    error_message: Optional[str] = Field(default=None, description="Error message if any failure occurred")
 
 
 def call_vector_search(url, query, rows=None):
@@ -48,43 +63,102 @@ def call_vector_search(url, query, rows=None):
     except requests.exceptions.RequestException as e:
         print(f"Error calling the API: {e}")
         return None
-    
-def find_shopping_items(queries: list[str]) -> Dict[str, str]:
+
+from typing import List, Dict, Any
+
+def find_shopping_items(queries: List[str]) -> Dict[str, Any]:
     """
-    Find shopping items from the e-commerce site with the specified list of
-    queries.
+    Searches an e-commerce vector database for shopping items based on a list of search queries.
+
+    When to use:
+        Use this tool when a user has expressed interest in discovering or browsing products,
+        and you want to retrieve a list of relevant items from the product database.
 
     Args:
-        queries: the list of queries to run.
+        queries: A list of user-intent-refined search queries (e.g., "men's blue linen shirt", "wireless earbuds").
+
     Returns:
-        A dict with the following one property:
-            - "status": returns the following status:
-                - "success": successful execution
-            - "items": items found in the e-commerce site.
+        A dictionary with the following structure:
+        {
+            "status": "success" | "error",
+            "items": [  # only if status is "success"
+                {
+                    "name": str,
+                    "description": str,
+                    "image_url": str,
+                    "price": str ,
+                    "id": str (optional)
+                },
+                ...
+            ],
+            "error_message": str (optional if status == "error")
+        }
+
+    Notes:
+        - Returns the top items found across all queries, merged into one list.
+        - The "items" field is suitable for rendering directly in the display UI.
+        - If no items are found or an error occurs, "items" may be an empty list or omitted.
     """
     url = "https://www.ac0.cloudadvocacyorg.joonix.net/api/query"
-
     items = []
-    for query in queries:
-        result = call_vector_search(
-            url=url,
-            query=query,
-            rows=3,
-        )
-        items.extend(result["items"])
+
+    try:
+        for query in queries:
+            result = call_vector_search(
+                url=url,
+                query=query,
+                rows=3,
+            )
+            if "items" in result:
+                items.extend(result["items"])
+
+        return {
+            "status": "success",
+            "items": items
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_message": str(e)
+        }
+
+# def find_shopping_items(queries: list[str]) -> Dict[str, str]:
+#     """
+#     Find shopping items from the e-commerce site with the specified list of
+#     queries.
+
+#     Args:
+#         queries: the list of queries to run.
+#     Returns:
+#         A dict with the following one property:
+#             - "status": returns the following status:
+#                 - "success": successful execution
+#             - "items": items found in the e-commerce site.
+#     """
+#     url = "https://www.ac0.cloudadvocacyorg.joonix.net/api/query"
+
+#     items = []
+#     for query in queries:
+#         result = call_vector_search(
+#             url=url,
+#             query=query,
+#             rows=3,
+#         )
+#         items.extend(result["items"])
 
     
-    return items
+#     return items
 
 # Create agents
-introductory_agent = Agent(
+introductory_agent = LlmAgent(
     name="Aavraa_introductory_agent",
     model="gemini-2.0-flash-exp",
     instruction=AAVRAA_INTRODUCTORY_AGENT_INSTRUCTION,
     description = "I am Aavraa, your intelligent lifestyle guide. I help users shop smarter, move faster, discover nearby trends, and get things done effortlessly using taps or voice commands. Powered by AI, I provide personalized assistance tailored to each user’s needs." ,  # Instructions to set the agent's behavior.
 )
 
-research_agent = Agent(
+research_agent = LlmAgent(
     model="gemini-2.0-flash-exp",
     name='aavraa_research_agent',
     description=('''
@@ -95,7 +169,7 @@ research_agent = Agent(
     tools=[google_search],
 )
 
-shop_agent = Agent(
+shop_agent = LlmAgent(
     model="gemini-2.0-flash-exp",
     name='aavraa_shop_agent',
     description=(
@@ -107,6 +181,8 @@ shop_agent = Agent(
         AgentTool(agent=research_agent),
         find_shopping_items,
     ],
+    output_schema=ShoppingItemsResponse,   # ⬅ enforce JSON structure
+    output_key="found_items", 
     
 )
 

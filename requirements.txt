@@ -11,6 +11,7 @@ pyaudio
 pillow
 mss
 googletrans
-google-adk==1.7.0
+google-adk==1.8.0
+# google-adk==1.6.1
 certifi
 

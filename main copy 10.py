@@ -58,10 +58,21 @@ async def start_agent_session(user_id: str, is_audio: bool = False):
 async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio: bool):
     """
     Handles messages coming from the agent and sends them to the client.
-    Sends text even in audio mode, and filters non-partial text events.
+    Differentiates between structured output (for UI) and speakable summary (for audio).
+    Accumulates partial text events.
     """
+    # Buffer to accumulate partial text from each agent for the current session.
+    # This ensures that incomplete JSON strings are not parsed.
+    agent_text_buffers = {} # {agent_name: accumulated_text_string}
+
     try:
         async for event in live_events:
+            event_author = getattr(event, 'author', 'unknown_agent')
+
+            # Initialize buffer for this agent if not present
+            if event_author not in agent_text_buffers:
+                agent_text_buffers[event_author] = ""
+
             # Handle turn completion or interruption signals first
             if event.turn_complete or event.interrupted:
                 message = {
@@ -70,49 +81,103 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
                 }
                 await websocket.send_text(json.dumps(message))
                 print(f"[AGENT TO CLIENT]: {message}")
+                
+                # Clear buffer for this agent on turn completion, in case of lingering partials
+                agent_text_buffers[event_author] = ""
                 continue
 
-            # Process function responses FIRST
-            responses = event.get_function_responses()
-            if responses:
-                for response in responses:
-                    tool_name = response.name
-                    if tool_name == "find_shopping_items":
-                        result_dict = response.response
+            # Ensure there's content and parts to process
+            part: Part = event.content.parts[0] if event.content and event.content.parts else None
+            if not part:
+                continue # No relevant content part, move to next event
+
+            # If it's audio data, send it regardless of mode
+            if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
+                audio_data = part.inline_data.data
+                if audio_data:
+                    await websocket.send_text(json.dumps({
+                        "mime_type": "audio/pcm",
+                        "data": base64.b64encode(audio_data).decode("ascii"),
+                    }))
+                    print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes. (From {event_author})")
+                continue # Audio handled, move to next event
+
+            # If it's text data
+            if part.text:
+                # If it's a partial event, just append to the buffer and send the chunk.
+                # Do NOT attempt JSON parsing here, as the text is incomplete.
+                if event.partial:
+                    agent_text_buffers[event_author] += part.text
+                    await websocket.send_text(json.dumps({
+                        "mime_type": "text/plain",
+                        "data": part.text, # Send the current partial chunk
+                        "agent": event_author,
+                        "partial": True # Indicate to client this is a partial update
+                    }))
+                    print(f"[AGENT TO CLIENT]: text/plain (partial): '{part.text}' (From {event_author})")
+                    continue # Wait for the next part or the final event
+
+                # If we reach here, it's a non-partial event, meaning this is the final chunk
+                # or the entire message was sent in one go.
+                full_text_content = agent_text_buffers[event_author] + part.text
+                # Clear the buffer for this agent as the full message is now processed.
+                agent_text_buffers[event_author] = ""
+
+                is_json_output = False
+                # Attempt to parse as a structured JSON output ONLY if it's from the shopping_worker_agent
+                # and the full accumulated content starts with the JSON markdown fence.
+                if event_author == "shopping_worker_agent" and full_text_content.strip().startswith("```json"):
+                    print(f"[AGENT TO CLIENT]: Detected potential JSON code block from {event_author} (full message).")
+                    try:
+                        # Extract the JSON string from within the markdown block.
+                        # This slicing is designed to remove the "```json" prefix and "```" suffix.
+                        json_str_for_parsing = full_text_content.strip()[len("```json"): -len("```")].strip()
                         
-                        # print(f"\n🛍️ Shopping Items from Tool: {tool_name}")
-                        
-                        # Send structured shopping data to client
+                        parsed_data = json.loads(json_str_for_parsing)
+                        is_json_output = True
+
+                        # Send as structured data to client (for UI display of products)
                         await websocket.send_text(json.dumps({
-                            "mime_type": "application/json",
-                            "type": "function_response",
-                            "tool_name": tool_name,
-                            "response": result_dict
+                            "type": "agent_structured_output", # Custom type for structured data
+                            "agent": event_author, # Indicate which agent sent this structured data
+                            "data": parsed_data
                         }))
-                        
-                        
-            # Process content parts (text/audio)
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    # If it's audio data, send it
-                    if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
-                        audio_data = part.inline_data.data
-                        if audio_data:
-                            await websocket.send_text(json.dumps({
-                                "mime_type": "audio/pcm",
-                                "data": base64.b64encode(audio_data).decode("ascii"),
-                            }))
-                            print(f"[AGENT TO CLIENT]: audio/pcm: {len(audio_data)} bytes.")
+                        print(f"[AGENT TO CLIENT]: Sent parsed structured output from {event_author}.")
 
-                    # If it's text data, send it ONLY IF IT'S A PARTIAL EVENT
-                    elif part.text:
-                        if event.partial:
-                            await websocket.send_text(json.dumps({
-                                "mime_type": "text/plain",
-                                "data": part.text,
-                            }))
-                            print(f"[AGENT TO CLIENT]: text/plain: {part.text}")
+                        # If in audio mode and this is the shopping_worker_agent's JSON,
+                        # we DO NOT want to generate audio for this. Skip further processing for this event.
+                        if is_audio:
+                            print(f"[AGENT TO CLIENT]: Suppressing audio for structured JSON from {event_author} in audio mode.")
+                            continue # Move to the next event in the live_events stream
 
+                    except (json.JSONDecodeError, IndexError) as e:
+                        print(f"[AGENT ERROR] JSON Decode Error or indexing issue from full text part ({event_author}): {e}")
+                        print(f"Failed JSON string (from full text part, attempting parse): '{json_str_for_parsing}'")
+                        is_json_output = False # If parsing fails, treat it as regular text below
+                    except Exception as e:
+                        print(f"[AGENT ERROR] General error processing JSON from full text part ({event_author}): {e}")
+                        is_json_output = False # If general error, treat as regular text below
+
+                # If it's not a JSON block (or JSON parsing failed), then it's a plain text message.
+                # This includes the final summary from the `shop_agent`.
+                if not is_json_output:
+                    message_type = "text/plain"
+                    # If this is the `shop_agent`'s output and we are in audio mode,
+                    # mark it as the final summary for text-to-speech.
+                    if event_author == "shop_agent" and is_audio:
+                        message_type = "final_text_summary"
+
+                    await websocket.send_text(json.dumps({
+                        "mime_type": "text/plain",
+                        "data": full_text_content,
+                        "agent": event_author,
+                        "type": message_type # Differentiate summary for TTS (client-side)
+                    }))
+                    print(f"[AGENT TO CLIENT]: Full text output: '{full_text_content}' (From {event_author}, type: {message_type})")
+                    # No `continue` here, as this is the intended final text/audio output for the user's turn.
+
+    except WebSocketDisconnect:
+        print("[AGENT TO CLIENT]: WebSocket disconnected gracefully.")
     except Exception as e:
         print(f"[AGENT ERROR] Error in agent_to_client_messaging: {e}")
 
