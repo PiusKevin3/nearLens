@@ -72,36 +72,34 @@ async def agent_to_client_messaging(websocket: WebSocket, live_events, is_audio:
                 print(f"[AGENT TO CLIENT]: {message}")
                 continue
 
-             # 🔹 Process function calls (arguments)
-            calls = event.get_function_calls()
-            if calls:
-                for call in calls:
-                    if call.name == "find_shopping_items":
-                        arguments = call.args
-                        print(f"\n🛍️ Shopping Items arguments: {arguments}")
-
-                        # Optionally forward arguments too
-                        await websocket.send_text(json.dumps({
-                            "mime_type": "application/json",
-                            "type": "function_call",
-                            "tool_name": call.name,
-                            "request": arguments
-                        }))
-
-            # 🔹 Process function responses (results)
+            # Process function responses FIRST
             responses = event.get_function_responses()
             if responses:
                 for response in responses:
-                    if response.name == "find_shopping_items":
+                    tool_name = response.name
+                    if tool_name == "find_shopping_items":
                         result_dict = response.response
-                        print(f"\n🛍️ Shopping Items result: {result_dict}")
 
-                        await websocket.send_text(json.dumps({
-                            "mime_type": "application/json",
-                            "type": "function_response",
-                            "tool_name": response.name,
-                            "response": result_dict
-                        }))
+                        calls = event.get_function_calls()
+                        if calls:
+                            for call in calls:
+                                tool_name = call.name
+                                if tool_name == "find_shopping_items":
+                                    arguments = call.args
+                                    print(f"\n🛍️ Shopping Items arguments: {tool_name}")
+                        
+                                    # print(f"\n🛍️ Shopping Items from Tool: {tool_name}")
+                                    # print(f"\n🛍️ Shopping Items: {result_dict}")
+
+                                    
+                                    # Send structured shopping data to client
+                                    await websocket.send_text(json.dumps({
+                                        "mime_type": "application/json",
+                                        "type": "function_response",
+                                        "tool_name": tool_name,
+                                        "response": result_dict,
+                                        "request": arguments
+                                    }))
                         
                         
             # Process content parts (text/audio)

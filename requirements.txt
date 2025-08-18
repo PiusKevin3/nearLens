@@ -14,4 +14,5 @@ googletrans
 google-adk==1.8.0
 # google-adk==1.6.1
 certifi
+supabase==2.18.1
 
