@@ -7,7 +7,7 @@ aiohttp
 genai
 google-genai>=1.16.0
 opencv-python
-pyaudio 
+# pyaudio 
 pillow
 mss
 googletrans
