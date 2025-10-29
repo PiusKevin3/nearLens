@@ -1,7 +1,7 @@
 from google.adk.agents import Agent,SequentialAgent
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools import google_search  # Import the tool
-from aavraa_assistant.instructions import (AAVRAA_INTRODUCTORY_AGENT_INSTRUCTION,AAVRAA_SHOP_AGENT_INSTRUCTION,MARKET_RESEARCHER_AGENT_INSTRUCTION)
+from aavraa_assistant.instructions import (AAVRAA_INTRODUCTORY_AGENT_INSTRUCTION,AAVRAA_SHOP_AGENT_INSTRUCTION,MARKET_RESEARCHER_AGENT_INSTRUCTION,TRANSLATOR_AGENT_INSTRUCTION)
 import os
 import requests
 import json
@@ -95,6 +95,13 @@ research_agent = Agent(
     tools=[google_search],
 )
 
+translator_agent = Agent(
+    name="aavraa_translator_agent",
+    model="gemini-2.0-flash-exp",
+    description="Handles automatic language detection and translation for all Aavraa agents.",
+    instruction=TRANSLATOR_AGENT_INSTRUCTION,
+)
+
 shop_agent = Agent(
     model="gemini-2.0-flash-exp",
     name='aavraa_shop_agent',
@@ -103,35 +110,15 @@ shop_agent = Agent(
     ),
     instruction=AAVRAA_SHOP_AGENT_INSTRUCTION,
     tools=[
+        AgentTool(agent=translator_agent),
         AgentTool(agent=introductory_agent),
         AgentTool(agent=research_agent),
         find_shopping_items,
+        # AgentTool(agent=translator_agent),
+
     ],
     
 )
 
-
-# Create sequential agent pipeline
-# aavraa_orchestrator = SequentialAgent(
-#     name="Aavraa",
-#     sub_agents=[
-#         introductory_agent,
-#         shop_agent        
-#     ]
-# )
-
 aavraa_orchestrator = shop_agent
 
-# aavraa_orchestrator = Agent(
-#    # A unique name for the agent.
-#    name="google_search_agent",
-#    # The Large Language Model (LLM) that agent will use.
-#    model="gemini-2.0-flash-exp", # if this model does not work, try below
-#    #model="gemini-2.0-flash-live-001",
-#    # A short description of the agent's purpose.
-#    description="Agent to answer questions using Google Search.",
-#    # Instructions to set the agent's behavior.
-#    instruction="Answer the question using the Google Search tool.",
-#    # Add google_search tool to perform grounding with Google search.
-#    tools=[google_search],
-# )
