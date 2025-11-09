@@ -1,0 +1,28 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/agents-461209/fe-nearlens', '-f', 'Dockerfile', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/agents-461209/fe-nearlens']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args: [
+      'run', 'deploy', 'fe-nearlens',
+      '--image', 'gcr.io/agents-461209/fe-nearlens',
+      '--region', 'us-central1',
+      '--platform', 'managed',
+      '--allow-unauthenticated'
+    ]
+    
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args: [
+      'run', 'services', 'add-iam-policy-binding', 'fe-nearlens',
+      '--region', 'us-central1',
+      '--member=allUsers',
+      '--role=roles/run.invoker'
+    ]
+
+images:
+  - 'gcr.io/agents-461209/fe-nearlens'

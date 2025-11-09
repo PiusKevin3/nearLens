@@ -1,0 +1,26 @@
+# Ignore node_modules from frontend
+frontend/node_modules/
+
+# Ignore Python virtual environments
+backend/venv/
+venv/
+
+# Ignore build outputs
+frontend/dist/
+build/
+dist/
+
+# Ignore local environment files
+.env
+.env.*
+# But allow the production one for frontend
+!frontend/.env.production
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore logs and temp files
+*.log
+*.pyc
+__pycache__/

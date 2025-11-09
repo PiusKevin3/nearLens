@@ -1,14 +1,18 @@
-# Example Python Dockerfile
-
+# Use official Python image
 FROM python:3.11-slim
 
+# Set work directory
 WORKDIR /app
 
-COPY . /app
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install -r requirements.txt
+# Copy the rest of the code
+COPY . .
 
-# Set the SSL_CERT_FILE environment variable
-ENV SSL_CERT_FILE=/usr/local/lib/python3.11/site-packages/certifi/cacert.pem
+# Set environment variables (these will also be configured in Cloud Run)
+ENV PORT 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the FastAPI app with Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
