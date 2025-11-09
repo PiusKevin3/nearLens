@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Image from "next/image";
-import {API_BASE_URL} from "@/lib/api"
+// import {API_BASE_URL} from "@/lib/api"
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -10,7 +10,7 @@ export default function Home() {
   const [response, setResponse] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
-
+  const API_BASE_URL = "https://nearlens-be-647675745295.me-west1.run.app"
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0] || null;
     setFile(selectedFile);
